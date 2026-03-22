@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.snackbar.Snackbar
+import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.PlayerConstants
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
@@ -23,6 +24,7 @@ import no.neverhood.nfcmediaplayer.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
     private var player: YouTubePlayer? = null
+    private var playerState: PlayerConstants.PlayerState = PlayerConstants.PlayerState.UNSTARTED
     private var currentVideoId = ""
     private var videoIdToWrite: String? = null
 
@@ -56,6 +58,12 @@ class MainActivity : AppCompatActivity() {
                 // Process the intent that started the activity
                 handleIntent(intent)
             }
+
+            // Capture state changes to know when video is playing
+            override fun onStateChange(youTubePlayer: YouTubePlayer, state: PlayerConstants.PlayerState) {
+                super.onStateChange(youTubePlayer, state)
+                playerState = state
+            }
         })
     }
 
@@ -83,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playVideo(videoId: String) {
-        if (videoId == currentVideoId) {
+        if (playerState == PlayerConstants.PlayerState.PLAYING && videoId == currentVideoId) {
             Log.d("NFC", "Already playing $videoId")
             return
         }
