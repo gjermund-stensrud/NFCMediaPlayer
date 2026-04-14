@@ -1,8 +1,10 @@
 package no.neverhood.nfcmediaplayer
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
@@ -12,7 +14,9 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.snackbar.Snackbar
@@ -22,6 +26,7 @@ import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.Abs
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
 import no.neverhood.nfcmediaplayer.databinding.ActivityMainBinding
 
+
 class MainActivity : AppCompatActivity() {
     private var player: YouTubePlayer? = null
     private var playerState: PlayerConstants.PlayerState = PlayerConstants.PlayerState.UNSTARTED
@@ -30,6 +35,21 @@ class MainActivity : AppCompatActivity() {
 
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var binding: ActivityMainBinding
+
+    private var pn532Manager: Pn532Manager? = null
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.entries.all { it.value }
+        if (allGranted) {
+            pn532Manager?.initBluetooth()
+        } else {
+            Snackbar.make(binding.root, "Bluetooth permissions are required", Snackbar.LENGTH_INDEFINITE)
+                .setAction("Retry") { checkPermissionsAndInit() }
+                .show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +67,10 @@ class MainActivity : AppCompatActivity() {
 
         // Init NFC
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+
+        // Check permissions and then init Bluetooth
+        pn532Manager = Pn532Manager(this)
+        checkPermissionsAndInit()
 
         // Init YoutubePlayerView
         val youTubePlayerView: YouTubePlayerView = binding.youtubePlayerView
@@ -67,6 +91,27 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // Bluetooth functions
+    fun checkPermissionsAndInit() {
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        val missingPermissions = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missingPermissions.isEmpty()) {
+            pn532Manager?.initBluetooth()
+        } else {
+            requestPermissionLauncher.launch(missingPermissions.toTypedArray())
+        }
+    }
+
     // YouTube functions
     private fun extractYoutubeId(url: String): String? {
         val patterns = listOf(
@@ -83,7 +128,7 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun extractAndPlayVideo(data: android.net.Uri) {
+    fun extractAndPlayVideo(data: android.net.Uri) {
         val videoId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
         if (videoId.isNotBlank()) {
             playVideo(videoId)
