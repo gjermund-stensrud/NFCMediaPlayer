@@ -1,7 +1,8 @@
 [versions]
 agp = "9.1.1"
 youtube = "13.0.0"
-blessed = "3.0.12"
+blessed = "0.5.0"
+coroutines = "1.10.2"
 timber = "5.0.1"
 coreKtx = "1.18.0"
 junit = "4.13.2"
@@ -15,12 +16,13 @@ constraintlayout = "2.2.1"
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 youtube = { module = "com.pierfrancescosoffritti.androidyoutubeplayer:core", version.ref = "youtube" }
-blessed = { module = "com.github.weliem:blessed-kotlin", version.ref = "blessed" }
+blessed = { module = "com.github.weliem:blessed-android-coroutines", version.ref = "blessed" }
 timber = { module = "com.jakewharton.timber:timber", version.ref = "timber" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+kotlinx-coroutines = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }

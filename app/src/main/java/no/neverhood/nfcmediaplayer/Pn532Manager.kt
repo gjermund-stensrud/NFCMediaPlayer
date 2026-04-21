@@ -1,183 +1,282 @@
 package no.neverhood.nfcmediaplayer
 
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.le.ScanResult
-import android.os.Handler
-import android.os.Looper
-import android.util.Log
-import com.welie.blessed.BluetoothBytesParser
 import com.welie.blessed.BluetoothCentralManager
-import com.welie.blessed.BluetoothCentralManagerCallback
 import com.welie.blessed.BluetoothPeripheral
-import com.welie.blessed.BluetoothPeripheralCallback
-import com.welie.blessed.GattStatus
 import com.welie.blessed.WriteType
+import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.UUID
 import androidx.core.net.toUri
+import com.welie.blessed.ConnectionState
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.io.ByteArrayOutputStream
 
 // HM-10 UUIDs
 private val SERVICE_UUID = UUID.fromString("0000FFE0-0000-1000-8000-00805F9B34FB")
 private val CHAR_UUID   = UUID.fromString("0000FFE1-0000-1000-8000-00805F9B34FB")
 private val wakeupCommand = byteArrayOf(0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff.toByte(), 0x03, 0xfd.toByte(), 0xd4.toByte(), 0x14, 0x01, 0x17, 0x00)
 
-enum class Pn532State {
-    POWER_ON,
-    SEARCHING,
-    CONNECTING,
-    SERVICE_DISCOVERY,
-    ENABLING_NOTIFICATIONS,
-    WAKEUP,
-    CONFIG,
-    SCANNING,
-    NDEF,
-}
-
 class Pn532Manager(val activity: MainActivity) {
-    private var central: BluetoothCentralManager? = null
-    private var connectedPeripheral: BluetoothPeripheral? = null
-    private var state: Pn532State = Pn532State.POWER_ON
-    private var receiveBuffer = byteArrayOf()
-    private var payloadBuffer = ""
-    private var ndefPage = 1
+    private var central = BluetoothCentralManager(activity.applicationContext)
+
+    // Response assembly state
+    private val responseBuffer = ByteArrayOutputStream()
+    private var responseDeferred: CompletableDeferred<ByteArray>? = null
 
     private val swVersionCommand = buildPn532Frame(0x02) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x02, 0xfe.toByte(), 0xd4.toByte(), 0x02, 0x2a, 0x00)
     private val inListPassiveTargetCommand = buildPn532Frame(0x4a, byteArrayOf(0x01, 0x00)) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x04, 0xfc.toByte(), 0xd4.toByte(), 0x4a, 0x01, 0x00, 0xe1.toByte(), 0x00)
 
     fun initBluetooth() {
-        if (central != null) return
+        Thread {
+            val scope = CoroutineScope(Job() + Dispatchers.IO)
 
-        val centralManagerCallback = object : BluetoothCentralManagerCallback() {
-            override fun onDiscovered(peripheral: BluetoothPeripheral, scanResult: ScanResult) {
-                Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
-                central?.stopScan()
-                central?.connect(peripheral, bluetoothPeripheralCallback)
-                state = Pn532State.CONNECTING
-            }
+            // Scan for device
+            central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
+                { peripheral, scanResult ->
+                    Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
+                    central.stopScan()
+                    central.autoConnectPeripheral(peripheral)
+                },
+                { scanFailure -> Timber.e("scan failed with reason $scanFailure")})
 
-            override fun onConnected(peripheral: BluetoothPeripheral) {
-                super.onConnected(peripheral)
-                Timber.i("Connected to peripheral '${peripheral.name}'")
-                connectedPeripheral = peripheral
-                state = Pn532State.SERVICE_DISCOVERY
-            }
-
-            val bluetoothPeripheralCallback = object : BluetoothPeripheralCallback() {
-                override fun onServicesDiscovered(peripheral: BluetoothPeripheral) {
-                    val success = peripheral.startNotify(SERVICE_UUID, CHAR_UUID)
-                    Timber.i("Notifications started: $success")
-                    state = Pn532State.ENABLING_NOTIFICATIONS
-                }
-
-                override fun onNotificationStateUpdate(
-                    peripheral: BluetoothPeripheral,
-                    characteristic: BluetoothGattCharacteristic,
-                    status: GattStatus
-                ) {
-                    Timber.i("Notification state updated: $status")
-                    connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, wakeupCommand, WriteType.WITH_RESPONSE)
-                    state = Pn532State.WAKEUP
-                }
-
-                override fun onCharacteristicWrite(
-                    peripheral: BluetoothPeripheral,
-                    value: ByteArray,
-                    characteristic: BluetoothGattCharacteristic,
-                    status: GattStatus
-                ) {
-                    val data = value.toHexString()
-                    Log.d("Bluetooth", "Data written: $data")
-                    Timber.i("Write completed with status: $status")
-
-                }
-
-                override fun onCharacteristicUpdate(
-                    peripheral: BluetoothPeripheral,
-                    value: ByteArray,
-                    characteristic: BluetoothGattCharacteristic,
-                    status: GattStatus
-                ) {
-                    if (status == GattStatus.SUCCESS) {
-                        val received = value.toHexString().trim()
-                        Timber.d("Received from HM-10: $received")
-
-                        // Strip ACK (if any)
-                        val dataFrame = stripPn532Ack(value)
-                        if(dataFrame.isEmpty()) return // No daa, ACK only
-
+            central.observeConnectionState { peripheral, state ->
+                Timber.i("Peripheral ${peripheral.name} has $state")
+                if(state == ConnectionState.CONNECTED) {
+                    scope.launch {
                         try {
-                            val payloadBytes = parsePn532Frame(dataFrame)
-                            if (payloadBytes.isEmpty()) {
-                                return
-                            }
-
-                            val data = payloadBytes.toHexString()
-                            Timber.d("Parsed data: $data")
-
-                            if (state == Pn532State.SCANNING) {
-                                // Tag detected. Parse serial number and read NDEF
-                                Timber.d("Tag detected: $data")
-                                val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, 0x04))
-                                connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, command, WriteType.WITH_RESPONSE)
-                                state = Pn532State.NDEF
-                            }
-
-                            else if (state == Pn532State.NDEF) {
-                                if (ndefPage == 1) {
-                                    val parser = BluetoothBytesParser(payloadBytes, 15)
-                                    payloadBuffer = parser.getString()
-
-                                    val byteNum = 4 * ++ndefPage
-                                    val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, byteNum.toByte()))
-                                    connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, command, WriteType.WITH_RESPONSE)
-                                }
-                                else if (ndefPage == 2) {
-                                    val parser = BluetoothBytesParser(payloadBytes, 3)
-                                    payloadBuffer += parser.getString()
-
-                                    val byteNum = 4 * ++ndefPage
-                                    val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, byteNum.toByte()))
-                                    connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, command, WriteType.WITH_RESPONSE)
-                                }
-                                else if (ndefPage == 3) {
-                                    val parser = BluetoothBytesParser(payloadBytes, 3)
-                                    payloadBuffer += parser.getString()
-
-                                    val uri = payloadBuffer.trim(0xFE.toChar()).toUri()
-                                    activity.extractAndPlayVideo(uri)
-                                }
-
-                                Timber.d("Tag: $payloadBuffer")
-                            }
-
-                            else if (state == Pn532State.WAKEUP && data == "d515") {
-                                connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, swVersionCommand, WriteType.WITH_RESPONSE)
-                                state = Pn532State.CONFIG
-                            }
-                            else if (state == Pn532State.CONFIG && data == "d50332010607") {
-                                connectedPeripheral?.writeCharacteristic(SERVICE_UUID, CHAR_UUID, inListPassiveTargetCommand, WriteType.WITH_RESPONSE)
-                                state = Pn532State.SCANNING
-                            }
-                            else {
-                                Timber.d("Received unknown response: $received")
-                            }
+                            setupNotificationObserver(peripheral)
+                            readTagLoop(peripheral)
                         } catch (e: Exception) {
-                            Timber.e(e, "Error parsing data")
-                            return
+                            Timber.e(e, "Unexpected error")
+                            // TODO, reconnect
                         }
                     }
                 }
             }
-        }
-
-        central = BluetoothCentralManager(activity.applicationContext, centralManagerCallback, Handler(Looper.getMainLooper()))
-        //central?.scanForPeripherals()
-        central?.scanForPeripheralsWithNames(setOf("NFC-MediaPlayer"))
-        state = Pn532State.SEARCHING
+        }.start()
     }
 
-    fun scanLoop() {
+    fun readTagLoop(peripheral: BluetoothPeripheral) {
+        // When device is connected. Send wakeup and config sequence
+        val wakeupBytes = sendCommand(peripheral, wakeupCommand)
+        if (wakeupBytes[0] != 0xd5.toByte() || wakeupBytes[1] != 0x15.toByte()) {
+            // Wakeup failed
+            return
+        }
 
+        // Get swVersion
+        val swVersionBytes = sendCommand(peripheral, swVersionCommand)
+        val swVersion = swVersionBytes.toHexString()
+
+        if (swVersion != "d50332010607") {
+            // Sw version failed
+            return
+        }
+
+        while (peripheral.getState() == ConnectionState.CONNECTED) {
+            // Scan for tag
+            val tagData = sendCommand(peripheral, inListPassiveTargetCommand)
+
+            // If error or timeout, restart scan
+            if (isErrorOrTimeout(tagData)) {
+                continue
+            }
+
+            // Tag detected. Parse serial number and read NDEF
+            Timber.d("Tag detected: %s", tagData.toHexString())
+
+            // Read first NDEF page
+            val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, 0x04))
+            val ndefData = sendCommand(peripheral, command)
+
+            if (isErrorOrTimeout(ndefData)) {
+                continue
+            }
+
+            var payloadBuffer = ndefData.copyOfRange(15, ndefData.size).toString(Charsets.UTF_8)
+
+            // Read NDEF pages until end
+            var ndefPage = 1
+            var hasMoreData = true
+            var hasError = false
+            while (hasMoreData) {
+                val byteNum = 4 * ++ndefPage
+                val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, byteNum.toByte()))
+                val ndefData = sendCommand(peripheral, command)
+
+                if (isErrorOrTimeout(ndefData)) {
+                    hasMoreData = false
+                    hasError = true
+                    continue
+                }
+
+                var len = ndefData.size
+                val endIndex = ndefData.indexOf(0xFE.toByte())
+                if (endIndex > 0) {
+                    hasMoreData = false
+                    len = endIndex
+                }
+
+                payloadBuffer += ndefData.copyOfRange(3, len).toString(Charsets.UTF_8)
+            }
+
+            if (hasError) {
+                continue
+            }
+
+            // Send URI to MainActivity
+            val uri = payloadBuffer.trim(0xFE.toChar()).toUri()
+            activity.extractAndPlayVideo(uri)
+        }
+
+        // TODO clean up connection and notification
+    }
+
+    fun isErrorOrTimeout(data: ByteArray): Boolean {
+        return data.isEmpty() // Timeout
+                || data[0] == 0xFF.toByte()
+                || (data.size == 3 && data[0] == 0xD5.toByte() && data[1] == 0x41.toByte() && data[2] == 0x01.toByte()) // Timeout error response
+
+    }
+
+    /**
+     * Sends a command and waits synchronously for the **complete** PN532 response.
+     *
+     * Handles responses split across multiple BLE notifications.
+     *
+     * @param command Raw command bytes (usually with full PN532 frame: preamble + length + ... + checksum)
+     * @param timeoutMs Timeout for the entire response (default 5s)
+     * @return Complete response as received from PN532 (including ACK + information frame)
+     */
+    fun sendCommand(peripheral: BluetoothPeripheral, command: ByteArray, timeoutMs: Long = 30000L): ByteArray {
+
+        if (peripheral.getState() != ConnectionState.CONNECTED) {
+            throw IllegalStateException("PN532 is not connected")
+        }
+
+        return runBlocking(Dispatchers.IO) {
+            resetResponseState()
+            val deferred = CompletableDeferred<ByteArray>()
+            responseDeferred = deferred
+
+            // Write the command
+            peripheral.writeCharacteristic(
+                SERVICE_UUID,
+                CHAR_UUID,
+                command,
+                WriteType.WITH_RESPONSE
+            )
+
+            // Wait for complete response (assembled from one or more notifications)
+            try {
+                withTimeout(timeoutMs) {
+                    deferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                Timber.e(e, "Timeout waiting for PN532 response")
+                byteArrayOf()
+            }
+        }
+    }
+
+    /**
+     * Sets up the notification observer that accumulates chunks.
+     */
+    private suspend fun setupNotificationObserver(peripheral: BluetoothPeripheral) {
+        val rxCharacteristic = peripheral.getCharacteristic(SERVICE_UUID, CHAR_UUID)
+            ?: throw IllegalStateException("RX characteristic not found on this device")
+
+        peripheral.observe(rxCharacteristic) { chunk: ByteArray ->
+            handleIncomingChunk(chunk)
+        }
+    }
+
+    /**
+     * Accumulates incoming data and checks if we have a complete PN532 frame.
+     */
+    private fun handleIncomingChunk(chunk: ByteArray) {
+        responseBuffer.write(stripPn532Ack(chunk))
+
+        val currentData = responseBuffer.toByteArray()
+
+        // Try to parse a complete frame from the accumulated data
+        val completeFrame = extractCompletePn532Frame(currentData)
+
+        if (completeFrame != null) {
+            // We have a full valid response → complete the deferred
+            val payload = parsePn532Frame(completeFrame)
+            responseDeferred?.complete(payload)
+            resetResponseState()
+        }
+        // Otherwise keep accumulating for the next notification
+    }
+
+    /**
+     * Looks for a complete PN532 response frame in the buffer.
+     * Supports both ACK and normal/extended information frames.
+     *
+     * Returns the frame bytes if complete and valid, otherwise null.
+     */
+    private fun extractCompletePn532Frame(data: ByteArray): ByteArray? {
+        if (data.size < 6) return null
+
+        var idx = 0
+
+        // Find start of a frame: 00 00 FF
+        while (idx + 5 < data.size) {
+            if (data[idx] == 0x00.toByte() &&
+                data[idx + 1] == 0x00.toByte() &&
+                data[idx + 2] == 0xFF.toByte()) {
+
+                // Check if it's an ACK frame (very common after command)
+                if (idx + 5 < data.size &&
+                    data[idx + 3] == 0x00.toByte() &&
+                    data[idx + 4] == 0xFF.toByte() &&
+                    data[idx + 5] == 0x00.toByte()) {
+
+                    // ACK is always 6 bytes: 00 00 FF 00 FF 00
+                    return if (idx + 6 <= data.size) {
+                        data.copyOfRange(idx, idx + 6)
+                    } else null
+                }
+
+                // Normal or Extended information frame
+                if (idx + 8 > data.size) return null // Not enough bytes yet
+
+                val len = data[idx + 3].toInt() and 0xFF
+
+                if (len == 0xFF) {
+                    // Extended frame: next 2 bytes = length (big endian)
+                    if (idx + 10 > data.size) return null
+                    val extendedLen = ((data[idx + 6].toInt() and 0xFF) shl 8) or (data[idx + 7].toInt() and 0xFF)
+                    val totalFrameSize = 10 + extendedLen + 2 // preamble(4) + LENM/LENL/LCS(3) + data + DCS + postamble(1) ≈ simplified
+
+                    if (idx + totalFrameSize <= data.size) {
+                        // Basic checksum validation can be added here if desired
+                        return data.copyOfRange(idx, idx + totalFrameSize)
+                    }
+                } else {
+                    // Normal frame: LEN + LCS + TFI + PD0..PDn + DCS + postamble
+                    val frameSize = 6 + len + 1 // rough: preamble(3) + LEN(1) + LCS(1) + data(LEN+1 incl TFI) + DCS(1) + post(1) + margin
+                    if (idx + frameSize <= data.size) {
+                        return data.copyOfRange(idx, idx + frameSize)
+                    }
+                }
+            }
+            idx++
+        }
+        return null // No complete frame yet
+    }
+
+    private fun resetResponseState() {
+        responseBuffer.reset()
+        responseDeferred = null
     }
 
     private fun buildPn532Frame(command: Byte, params: ByteArray = byteArrayOf()): ByteArray {
@@ -197,44 +296,33 @@ class Pn532Manager(val activity: MainActivity) {
      * PN532 Frame: Preamble(1), StartCode(2), Len(1), LenCS(1), Data(n), CS(1), Postamble(1)
      */
     fun parsePn532Frame(data: ByteArray): ByteArray {
-        // Prepend previously incomplete frame (if any)
-        val rawData = receiveBuffer + data
-        if (receiveBuffer.isNotEmpty()) {
-            receiveBuffer = byteArrayOf()
-        }
-
-        if (rawData.size < 7) throw IllegalArgumentException("Frame too short")
+        if (data.size < 7) throw IllegalArgumentException("Frame too short")
 
         // 1. Identify start of frame (0x00 0x00 0xFF) or 0x00 0xFF
         var startOffset = 0
-        while (startOffset < rawData.size - 2 &&
-            !(rawData[startOffset] == 0x00.toByte() &&
-                    (rawData[startOffset + 1] == 0xFF.toByte() ||
-                            (rawData[startOffset + 1] == 0x00.toByte() && rawData[startOffset + 2] == 0xFF.toByte())))
+        while (startOffset < data.size - 2 &&
+            !(data[startOffset] == 0x00.toByte() &&
+                    (data[startOffset + 1] == 0xFF.toByte() ||
+                            (data[startOffset + 1] == 0x00.toByte() && data[startOffset + 2] == 0xFF.toByte())))
         ) {
             startOffset++
         }
 
         // Handle possible preamble/padding
-        val headerOffset = if (rawData[startOffset + 1] == 0xFF.toByte()) startOffset else startOffset + 1
+        val headerOffset = if (data[startOffset + 1] == 0xFF.toByte()) startOffset else startOffset + 1
 
         // 2. Read length byte
-        val len = rawData[headerOffset + 2].toInt() and 0xFF
+        val len = data[headerOffset + 2].toInt() and 0xFF
         if (len == 0) return byteArrayOf() // Extended frame or ACK
-        if (len > rawData.size - headerOffset - 6) {
-            // Frame is not complete. Store for use when more data arrives
-            receiveBuffer += rawData
-            return byteArrayOf()
-        }
 
         // 3. Verify Length Checksum (Len + LenCS = 0)
-        val lenCs = rawData[headerOffset + 3].toInt() and 0xFF
+        val lenCs = data[headerOffset + 3].toInt() and 0xFF
         if (((len + lenCs) and 0xFF) != 0) {
             throw IllegalArgumentException("Length checksum failed")
         }
 
         // 4. Extract Data Payload (Length bytes starting after LenCS)
-        val dataPayload = rawData.copyOfRange(headerOffset + 4, headerOffset + 4 + len)
+        val dataPayload = data.copyOfRange(headerOffset + 4, headerOffset + 4 + len)
 
         // 5. Verify Data Checksum
         var sum = 0
@@ -242,7 +330,7 @@ class Pn532Manager(val activity: MainActivity) {
             sum += dataPayload[i].toInt()
         }
         val expectedCs = (0x100 - (sum and 0xFF)) and 0xFF
-        val actualCs = rawData[headerOffset + 4 + len].toInt() and 0xFF
+        val actualCs = data[headerOffset + 4 + len].toInt() and 0xFF
 
         if (expectedCs != actualCs) {
             throw IllegalArgumentException("Data checksum failed: Expected $expectedCs, Got $actualCs")

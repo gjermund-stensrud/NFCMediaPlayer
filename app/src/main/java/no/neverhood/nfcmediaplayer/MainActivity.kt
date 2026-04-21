@@ -25,6 +25,7 @@ import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
 import no.neverhood.nfcmediaplayer.databinding.ActivityMainBinding
+import timber.log.Timber
 
 
 class MainActivity : AppCompatActivity() {
@@ -64,6 +65,9 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+
+        // Init Timber
+        Timber.plant(Timber.DebugTree())   // This forwards logs to android.util.Log → Logcat
 
         // Init NFC
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
