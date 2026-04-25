@@ -41,7 +41,11 @@ class Pn532Manager(val activity: MainActivity) {
                 { peripheral, scanResult ->
                     Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
                     central.stopScan()
-                    central.autoConnectPeripheral(peripheral)
+                    try {
+                        central.autoConnectPeripheral(peripheral)
+                    } catch (e: Exception) {
+                        Timber.e(e, "Failed to connect to peripheral")
+                    }
                 },
                 { scanFailure -> Timber.e("scan failed with reason $scanFailure")})
 
@@ -73,6 +77,7 @@ class Pn532Manager(val activity: MainActivity) {
         // Get swVersion
         val swVersionBytes = sendCommand(peripheral, swVersionCommand)
         val swVersion = swVersionBytes.toHexString()
+        Timber.d("SW Version: %s", swVersion)
 
         if (swVersion != "d50332010607") {
             // Sw version failed
@@ -81,7 +86,8 @@ class Pn532Manager(val activity: MainActivity) {
 
         while (peripheral.getState() == ConnectionState.CONNECTED) {
             // Scan for tag
-            val tagData = sendCommand(peripheral, inListPassiveTargetCommand)
+            Timber.d("Scanning for tag...")
+            val tagData = sendCommand(peripheral, inListPassiveTargetCommand, 60000L)
 
             // If error or timeout, restart scan
             if (isErrorOrTimeout(tagData)) {
@@ -89,31 +95,38 @@ class Pn532Manager(val activity: MainActivity) {
             }
 
             // Tag detected. Parse serial number and read NDEF
-            Timber.d("Tag detected: %s", tagData.toHexString())
-
-            // Read first NDEF page
-            val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, 0x04))
-            val ndefData = sendCommand(peripheral, command)
-
-            if (isErrorOrTimeout(ndefData)) {
-                continue
-            }
-
-            var payloadBuffer = ndefData.copyOfRange(15, ndefData.size).toString(Charsets.UTF_8)
+            val tagId = tagData.copyOfRange(8, 8 + tagData[7].toInt()).toHexString()
+            Timber.d("TagCount: %d. TagNumber: %d. TagType: %02X. TagID: %s", tagData[2], tagData[3], tagData[6], tagId)
 
             // Read NDEF pages until end
             var ndefPage = 1
             var hasMoreData = true
             var hasError = false
-            while (hasMoreData) {
-                val byteNum = 4 * ++ndefPage
+            var payloadBuffer = ""
+            var payloadLength = 0
+            var readLength = 0
+            while (hasMoreData && readLength <= payloadLength) {
+                //Timber.d("Reading NDEF page %d", ndefPage)
+                val byteNum = 4 * ndefPage
                 val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, byteNum.toByte()))
                 val ndefData = sendCommand(peripheral, command)
 
                 if (isErrorOrTimeout(ndefData)) {
-                    hasMoreData = false
                     hasError = true
-                    continue
+                    break
+                }
+
+                var startIndex = 3
+                if (ndefPage == 1) {
+                    startIndex = 15
+                    payloadLength = ndefData[12].toInt()
+                    val dataType = byteArrayOf(ndefData[13]).toString(Charsets.UTF_8)
+                    Timber.d("NDEF Header: %02X. TypeLength: %d. PayloadLength: %d. DataType: %s", ndefData[10], ndefData[11], ndefData[12], dataType)
+                    if(dataType != "U") {
+                        Timber.d("Unsupported NDEF type: %s", dataType)
+                        hasError = true
+                        break
+                    }
                 }
 
                 var len = ndefData.size
@@ -123,7 +136,10 @@ class Pn532Manager(val activity: MainActivity) {
                     len = endIndex
                 }
 
-                payloadBuffer += ndefData.copyOfRange(3, len).toString(Charsets.UTF_8)
+                payloadBuffer += ndefData.copyOfRange(startIndex, len).toString(Charsets.UTF_8)
+                readLength += len - startIndex
+
+                ndefPage++
             }
 
             if (hasError) {
@@ -131,18 +147,27 @@ class Pn532Manager(val activity: MainActivity) {
             }
 
             // Send URI to MainActivity
+            Timber.d("Payload: %s", payloadBuffer)
             val uri = payloadBuffer.trim(0xFE.toChar()).toUri()
             activity.extractAndPlayVideo(uri)
         }
 
         // TODO clean up connection and notification
+        Timber.d("readTagLoop ended")
     }
 
     fun isErrorOrTimeout(data: ByteArray): Boolean {
-        return data.isEmpty() // Timeout
-                || data[0] == 0xFF.toByte()
-                || (data.size == 3 && data[0] == 0xD5.toByte() && data[1] == 0x41.toByte() && data[2] == 0x01.toByte()) // Timeout error response
+        if (data.isEmpty()) {
+            // Timeout
+            return true
+        }
+        if (data.size == 3 && data[0] == 0xD5.toByte() && data[1] == 0x41.toByte() && data[2] != 0x00.toByte()) {
+            // PN532 returned Timeout error response
+            Timber.d("PN532 returned error code: %02X", data[2])
+            return true
+        }
 
+        return false
     }
 
     /**
@@ -154,7 +179,7 @@ class Pn532Manager(val activity: MainActivity) {
      * @param timeoutMs Timeout for the entire response (default 5s)
      * @return Complete response as received from PN532 (including ACK + information frame)
      */
-    fun sendCommand(peripheral: BluetoothPeripheral, command: ByteArray, timeoutMs: Long = 30000L): ByteArray {
+    fun sendCommand(peripheral: BluetoothPeripheral, command: ByteArray, timeoutMs: Long = 1000L): ByteArray {
 
         if (peripheral.getState() != ConnectionState.CONNECTED) {
             throw IllegalStateException("PN532 is not connected")
