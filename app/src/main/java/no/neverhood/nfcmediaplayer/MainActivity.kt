@@ -95,6 +95,10 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    fun setStatus(text: String) {
+        binding.textStatus.text = text
+    }
+
     // Bluetooth functions
     fun checkPermissionsAndInit() {
         val permissions = mutableListOf<String>()

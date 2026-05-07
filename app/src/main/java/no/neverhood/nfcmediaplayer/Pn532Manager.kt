@@ -13,9 +13,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
+import kotlin.coroutines.cancellation.CancellationException
 
 // HM-10 UUIDs
 private val SERVICE_UUID = UUID.fromString("0000FFE0-0000-1000-8000-00805F9B34FB")
@@ -32,25 +34,31 @@ class Pn532Manager(val activity: MainActivity) {
     private val swVersionCommand = buildPn532Frame(0x02) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x02, 0xfe.toByte(), 0xd4.toByte(), 0x02, 0x2a, 0x00)
     private val inListPassiveTargetCommand = buildPn532Frame(0x4a, byteArrayOf(0x01, 0x00)) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x04, 0xfc.toByte(), 0xd4.toByte(), 0x4a, 0x01, 0x00, 0xe1.toByte(), 0x00)
 
+    private fun startScan() {
+        activity.setStatus("Scanning...")
+        central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
+            { peripheral, scanResult ->
+                Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
+                central.stopScan()
+                try {
+                    central.autoConnectPeripheral(peripheral)
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to connect to peripheral")
+                }
+            },
+            { scanFailure -> Timber.e("scan failed with reason $scanFailure")})
+    }
+
     fun initBluetooth() {
         Thread {
             val scope = CoroutineScope(Job() + Dispatchers.IO)
 
             // Scan for device
-            central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
-                { peripheral, scanResult ->
-                    Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
-                    central.stopScan()
-                    try {
-                        central.autoConnectPeripheral(peripheral)
-                    } catch (e: Exception) {
-                        Timber.e(e, "Failed to connect to peripheral")
-                    }
-                },
-                { scanFailure -> Timber.e("scan failed with reason $scanFailure")})
+            startScan()
 
             central.observeConnectionState { peripheral, state ->
                 Timber.i("Peripheral ${peripheral.name} has $state")
+                activity.setStatus(state.toString())
                 if(state == ConnectionState.CONNECTED) {
                     scope.launch {
                         try {
@@ -58,9 +66,14 @@ class Pn532Manager(val activity: MainActivity) {
                             readTagLoop(peripheral)
                         } catch (e: Exception) {
                             Timber.e(e, "Unexpected error")
-                            // TODO, reconnect
                         }
                     }
+                }
+                if(state == ConnectionState.DISCONNECTED) {
+                    // Clean up and start scanning
+                    responseDeferred?.cancel()
+                    //scope.cancel()
+                    startScan()
                 }
             }
         }.start()
@@ -87,7 +100,8 @@ class Pn532Manager(val activity: MainActivity) {
         while (peripheral.getState() == ConnectionState.CONNECTED) {
             // Scan for tag
             Timber.d("Scanning for tag...")
-            val tagData = sendCommand(peripheral, inListPassiveTargetCommand, 60000L)
+            activity.setStatus("Waiting for tag...")
+            val tagData = sendCommand(peripheral, inListPassiveTargetCommand, 0)
 
             // If error or timeout, restart scan
             if (isErrorOrTimeout(tagData)) {
@@ -97,6 +111,7 @@ class Pn532Manager(val activity: MainActivity) {
             // Tag detected. Parse serial number and read NDEF
             val tagId = tagData.copyOfRange(8, 8 + tagData[7].toInt()).toHexString()
             Timber.d("TagCount: %d. TagNumber: %d. TagType: %02X. TagID: %s", tagData[2], tagData[3], tagData[6], tagId)
+            activity.setStatus("Tag detected")
 
             // Read NDEF pages until end
             var ndefPage = 1
@@ -147,6 +162,7 @@ class Pn532Manager(val activity: MainActivity) {
             }
 
             // Send URI to MainActivity
+            activity.setStatus("URI extracted")
             Timber.d("Payload: %s", payloadBuffer)
             val uri = payloadBuffer.trim(0xFE.toChar()).toUri()
             activity.extractAndPlayVideo(uri)
@@ -176,7 +192,7 @@ class Pn532Manager(val activity: MainActivity) {
      * Handles responses split across multiple BLE notifications.
      *
      * @param command Raw command bytes (usually with full PN532 frame: preamble + length + ... + checksum)
-     * @param timeoutMs Timeout for the entire response (default 5s)
+     * @param timeoutMs Timeout for the entire response (default 1s)
      * @return Complete response as received from PN532 (including ACK + information frame)
      */
     fun sendCommand(peripheral: BluetoothPeripheral, command: ByteArray, timeoutMs: Long = 1000L): ByteArray {
@@ -200,11 +216,18 @@ class Pn532Manager(val activity: MainActivity) {
 
             // Wait for complete response (assembled from one or more notifications)
             try {
-                withTimeout(timeoutMs) {
+                if (timeoutMs > 0) {
+                    withTimeout(timeoutMs) {
+                        deferred.await()
+                    }
+                } else {
                     deferred.await()
                 }
             } catch (e: TimeoutCancellationException) {
                 Timber.e(e, "Timeout waiting for PN532 response")
+                byteArrayOf()
+            } catch (e: CancellationException) {
+                Timber.e(e, "Wait for PN532 cancelled")
                 byteArrayOf()
             }
         }

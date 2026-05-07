@@ -43,11 +43,19 @@
 
         <TextView
             android:layout_width="wrap_content"
-            android:layout_height="match_parent"
+            android:layout_height="300dp"
             android:layout_gravity="center"
             android:gravity="center"
             android:textSize="18pt"
             android:text="Scan NFC brikke\n for å starte avspilling" />
+        <TextView
+            android:id="@+id/text_status"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="end"
+            android:gravity="end"
+            android:textSize="10pt"
+            android:text="Disconnected" />
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
