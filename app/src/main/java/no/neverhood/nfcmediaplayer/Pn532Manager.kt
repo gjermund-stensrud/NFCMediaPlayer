@@ -1,19 +1,18 @@
 package no.neverhood.nfcmediaplayer
 
+import android.nfc.NdefMessage
 import com.welie.blessed.BluetoothCentralManager
 import com.welie.blessed.BluetoothPeripheral
 import com.welie.blessed.WriteType
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.UUID
-import androidx.core.net.toUri
 import com.welie.blessed.ConnectionState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
@@ -21,7 +20,16 @@ import kotlin.coroutines.cancellation.CancellationException
 
 // HM-10 UUIDs
 private val SERVICE_UUID = UUID.fromString("0000FFE0-0000-1000-8000-00805F9B34FB")
-private val CHAR_UUID   = UUID.fromString("0000FFE1-0000-1000-8000-00805F9B34FB")
+private val CHAR_READ_UUID   = UUID.fromString("0000FFE1-0000-1000-8000-00805F9B34FB")
+private val CHAR_WRITE_UUID   = UUID.fromString("0000FFE1-0000-1000-8000-00805F9B34FB")
+
+// Minicopy UUIDs
+/*
+private val SERVICE_UUID = UUID.fromString("0000FF00-0000-1000-8000-00805F9B34FB")
+private val CHAR_READ_UUID   = UUID.fromString("0000FF01-0000-1000-8000-00805F9B34FB")
+private val CHAR_WRITE_UUID   = UUID.fromString("0000FF02-0000-1000-8000-00805F9B34FB")
+*/
+
 private val wakeupCommand = byteArrayOf(0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff.toByte(), 0x03, 0xfd.toByte(), 0xd4.toByte(), 0x14, 0x01, 0x17, 0x00)
 
 class Pn532Manager(val activity: MainActivity) {
@@ -36,6 +44,7 @@ class Pn532Manager(val activity: MainActivity) {
 
     private fun startScan() {
         activity.setStatus("Scanning...")
+        // TODO Scan using services instead of names and support Minicopy
         central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
             { peripheral, scanResult ->
                 Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
@@ -72,7 +81,6 @@ class Pn532Manager(val activity: MainActivity) {
                 if(state == ConnectionState.DISCONNECTED) {
                     // Clean up and start scanning
                     responseDeferred?.cancel()
-                    //scope.cancel()
                     startScan()
                 }
             }
@@ -110,20 +118,20 @@ class Pn532Manager(val activity: MainActivity) {
 
             // Tag detected. Parse serial number and read NDEF
             val tagId = tagData.copyOfRange(8, 8 + tagData[7].toInt()).toHexString()
-            Timber.d("TagCount: %d. TagNumber: %d. TagType: %02X. TagID: %s", tagData[2], tagData[3], tagData[6], tagId)
+            Timber.d("TagCount: %d. TagNumber: %d. TagType(ATQA): %02X %02X. SAK: %02X. TagID: %s", tagData[2], tagData[3], tagData[4], tagData[5], tagData[6], tagId)
             activity.setStatus("Tag detected")
 
             // Read NDEF pages until end
             var ndefPage = 1
             var hasMoreData = true
             var hasError = false
-            var payloadBuffer = ""
-            var payloadLength = 0
+            var payloadBuffer = byteArrayOf()
+            var byteLength = 0
             var readLength = 0
-            while (hasMoreData && readLength <= payloadLength) {
+            while (hasMoreData && readLength <= byteLength) {
                 //Timber.d("Reading NDEF page %d", ndefPage)
-                val byteNum = 4 * ndefPage
-                val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, byteNum.toByte()))
+                val blockNum = 4 * ndefPage
+                val command = buildPn532Frame(0x40, byteArrayOf(0x01, 0x30, blockNum.toByte()))
                 val ndefData = sendCommand(peripheral, command)
 
                 if (isErrorOrTimeout(ndefData)) {
@@ -133,15 +141,10 @@ class Pn532Manager(val activity: MainActivity) {
 
                 var startIndex = 3
                 if (ndefPage == 1) {
-                    startIndex = 15
-                    payloadLength = ndefData[12].toInt()
-                    val dataType = byteArrayOf(ndefData[13]).toString(Charsets.UTF_8)
-                    Timber.d("NDEF Header: %02X. TypeLength: %d. PayloadLength: %d. DataType: %s", ndefData[10], ndefData[11], ndefData[12], dataType)
-                    if(dataType != "U") {
-                        Timber.d("Unsupported NDEF type: %s", dataType)
-                        hasError = true
-                        break
-                    }
+                    // Find NDEF start indicator (0xD1)
+                    startIndex = ndefData.indexOf(0xD1.toByte())
+                    // Number of bytes is in the byte preceding NDEF start
+                    byteLength = ndefData[startIndex-1].toInt()
                 }
 
                 var len = ndefData.size
@@ -151,7 +154,7 @@ class Pn532Manager(val activity: MainActivity) {
                     len = endIndex
                 }
 
-                payloadBuffer += ndefData.copyOfRange(startIndex, len).toString(Charsets.UTF_8)
+                payloadBuffer += ndefData.copyOfRange(startIndex, len)
                 readLength += len - startIndex
 
                 ndefPage++
@@ -161,11 +164,25 @@ class Pn532Manager(val activity: MainActivity) {
                 continue
             }
 
-            // Send URI to MainActivity
-            activity.setStatus("URI extracted")
-            Timber.d("Payload: %s", payloadBuffer)
-            val uri = payloadBuffer.trim(0xFE.toChar()).toUri()
-            activity.extractAndPlayVideo(uri)
+            try {
+                val message = NdefMessage(payloadBuffer)
+
+                if(message.records.size == 0) {
+                    Timber.d("No ndef records found on tag")
+                    continue
+                }
+
+                // Get URI
+                val uri = message.records[0].toUri()
+                if (uri != null) {
+                    // Send URI to MainActivity
+                    activity.setStatus("URI extracted")
+                    Timber.d("URI: %s", uri)
+                    activity.extractAndPlayVideo(uri)
+                }
+            } catch (e: Exception) {
+                Timber.e(e,"Invalid NDEF message")
+            }
         }
 
         // TODO clean up connection and notification
@@ -178,7 +195,7 @@ class Pn532Manager(val activity: MainActivity) {
             return true
         }
         if (data.size == 3 && data[0] == 0xD5.toByte() && data[1] == 0x41.toByte() && data[2] != 0x00.toByte()) {
-            // PN532 returned Timeout error response
+            // PN532 returned error response
             Timber.d("PN532 returned error code: %02X", data[2])
             return true
         }
@@ -209,7 +226,7 @@ class Pn532Manager(val activity: MainActivity) {
             // Write the command
             peripheral.writeCharacteristic(
                 SERVICE_UUID,
-                CHAR_UUID,
+                CHAR_WRITE_UUID,
                 command,
                 WriteType.WITH_RESPONSE
             )
@@ -237,7 +254,7 @@ class Pn532Manager(val activity: MainActivity) {
      * Sets up the notification observer that accumulates chunks.
      */
     private suspend fun setupNotificationObserver(peripheral: BluetoothPeripheral) {
-        val rxCharacteristic = peripheral.getCharacteristic(SERVICE_UUID, CHAR_UUID)
+        val rxCharacteristic = peripheral.getCharacteristic(SERVICE_UUID, CHAR_READ_UUID)
             ?: throw IllegalStateException("RX characteristic not found on this device")
 
         peripheral.observe(rxCharacteristic) { chunk: ByteArray ->
