@@ -12,7 +12,6 @@ import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -145,13 +144,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun playVideo(videoId: String) {
         if (playerState == PlayerConstants.PlayerState.PLAYING && videoId == currentVideoId) {
-            Log.d("NFC", "Already playing $videoId")
+            Timber.d("Already playing $videoId")
             return
         }
-        Log.d("NFC", "Playing video: $videoId")
+        Timber.d("Playing video: $videoId")
         currentVideoId = videoId
         player?.loadVideo(videoId, 0f)
-        Snackbar.make(binding.root, "Playing: $videoId", Snackbar.LENGTH_SHORT).show()
     }
 
     // NFC functions
@@ -179,7 +177,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        Log.d("NFC", "onNewIntent: ${intent.action}")
+        Timber.d("onNewIntent: ${intent.action}")
         setIntent(intent)
         handleIntent(intent)
     }
@@ -219,7 +217,7 @@ class MainActivity : AppCompatActivity() {
                     extractAndPlayVideo(data)
                     return
                 } else {
-                    Log.d("NFC", "Incorrect NDEF data found in intent")
+                    Timber.d("Incorrect NDEF data found in intent")
                     // It might be a generic tag or one we're supposed to read via NDEF messages
                 }
 
@@ -265,7 +263,7 @@ class MainActivity : AppCompatActivity() {
             ndef.writeNdefMessage(message)
             Snackbar.make(binding.root, "Video stored successfully!", Snackbar.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Log.e("NFC", "Error writing to tag", e)
+            Timber.e(e, "Error writing to tag")
             Snackbar.make(binding.root, "Failed to write to tag", Snackbar.LENGTH_SHORT).show()
         } finally {
             ndef.close()

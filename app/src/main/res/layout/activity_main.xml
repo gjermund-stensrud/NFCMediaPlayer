@@ -11,8 +11,12 @@
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical" >
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@id/text_status"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
 
         <com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView
             android:id="@+id/youtube_player_view"
@@ -28,17 +32,6 @@
             android:layout_marginTop="20dp"
             android:checkedButton="@+id/radio_play_music">
 
-            <RadioButton
-                android:id="@+id/radio_play_music"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Spill musikk" />
-
-            <RadioButton
-                android:id="@+id/radio_play_video"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Spill video" />
         </RadioGroup>
 
         <TextView
@@ -48,14 +41,21 @@
             android:gravity="center"
             android:textSize="18pt"
             android:text="Scan NFC brikke\n for å starte avspilling" />
-        <TextView
-            android:id="@+id/text_status"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_gravity="end"
-            android:gravity="end"
-            android:textSize="10pt"
-            android:text="Disconnected" />
+
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/text_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="8dp"
+        android:background="?android:attr/windowBackground"
+        android:elevation="4dp"
+        android:gravity="end"
+        android:textSize="10pt"
+        android:text="Disconnected"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

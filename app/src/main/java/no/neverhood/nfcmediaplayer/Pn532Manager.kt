@@ -43,7 +43,7 @@ class Pn532Manager(val activity: MainActivity) {
     private val inListPassiveTargetCommand = buildPn532Frame(0x4a, byteArrayOf(0x01, 0x00)) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x04, 0xfc.toByte(), 0xd4.toByte(), 0x4a, 0x01, 0x00, 0xe1.toByte(), 0x00)
 
     private fun startScan() {
-        activity.setStatus("Scanning...")
+        activity.setStatus("Søker etter ekstern enhet...")
         // TODO Scan using services instead of names and support Minicopy
         central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
             { peripheral, scanResult ->
@@ -55,7 +55,7 @@ class Pn532Manager(val activity: MainActivity) {
                     Timber.e(e, "Failed to connect to peripheral")
                 }
             },
-            { scanFailure -> Timber.e("scan failed with reason $scanFailure")})
+            { scanFailure -> Timber.e("Scan failed with reason $scanFailure")})
     }
 
     fun initBluetooth() {
@@ -67,7 +67,14 @@ class Pn532Manager(val activity: MainActivity) {
 
             central.observeConnectionState { peripheral, state ->
                 Timber.i("Peripheral ${peripheral.name} has $state")
-                activity.setStatus(state.toString())
+                var statusText: String
+                statusText = when (state) {
+                    ConnectionState.CONNECTED -> "Tilkoblet"
+                    ConnectionState.CONNECTING -> "Kobler til..."
+                    ConnectionState.DISCONNECTED -> "Frakoblet"
+                    ConnectionState.DISCONNECTING -> "Kobler fra..."
+                }
+                activity.setStatus(statusText)
                 if(state == ConnectionState.CONNECTED) {
                     scope.launch {
                         try {
@@ -100,15 +107,10 @@ class Pn532Manager(val activity: MainActivity) {
         val swVersion = swVersionBytes.toHexString()
         Timber.d("SW Version: %s", swVersion)
 
-        if (swVersion != "d50332010607") {
-            // Sw version failed
-            return
-        }
-
         while (peripheral.getState() == ConnectionState.CONNECTED) {
             // Scan for tag
-            Timber.d("Scanning for tag...")
-            activity.setStatus("Waiting for tag...")
+            Timber.d("Waiting for tag...")
+            activity.setStatus("Venter på tag...")
             val tagData = sendCommand(peripheral, inListPassiveTargetCommand, 0)
 
             // If error or timeout, restart scan
@@ -119,7 +121,7 @@ class Pn532Manager(val activity: MainActivity) {
             // Tag detected. Parse serial number and read NDEF
             val tagId = tagData.copyOfRange(8, 8 + tagData[7].toInt()).toHexString()
             Timber.d("TagCount: %d. TagNumber: %d. TagType(ATQA): %02X %02X. SAK: %02X. TagID: %s", tagData[2], tagData[3], tagData[4], tagData[5], tagData[6], tagId)
-            activity.setStatus("Tag detected")
+            activity.setStatus("Tag oppdaget")
 
             // Read NDEF pages until end
             var ndefPage = 1
@@ -143,6 +145,13 @@ class Pn532Manager(val activity: MainActivity) {
                 if (ndefPage == 1) {
                     // Find NDEF start indicator (0xD1)
                     startIndex = ndefData.indexOf(0xD1.toByte())
+
+                    if (startIndex < 0) {
+                        // Start indicator not found. Probably an empty tag
+                        hasError = true
+                        break
+                    }
+
                     // Number of bytes is in the byte preceding NDEF start
                     byteLength = ndefData[startIndex-1].toInt()
                 }
@@ -176,7 +185,6 @@ class Pn532Manager(val activity: MainActivity) {
                 val uri = message.records[0].toUri()
                 if (uri != null) {
                     // Send URI to MainActivity
-                    activity.setStatus("URI extracted")
                     Timber.d("URI: %s", uri)
                     activity.extractAndPlayVideo(uri)
                 }
