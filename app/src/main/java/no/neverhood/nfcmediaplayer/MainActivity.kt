@@ -14,10 +14,12 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.PlayerConstants
 import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
@@ -32,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private var playerState: PlayerConstants.PlayerState = PlayerConstants.PlayerState.UNSTARTED
     private var currentVideoId = ""
     private var videoIdToWrite: String? = null
+    private var writeDialog: AlertDialog? = null
 
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var binding: ActivityMainBinding
@@ -98,6 +101,25 @@ class MainActivity : AppCompatActivity() {
         binding.textStatus.text = text
     }
 
+    private fun showWriteDialog() {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_write_nfc, null)
+        writeDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Skriv til NFC Tag")
+            .setView(dialogView)
+            .setNegativeButton("Avbryt") { _, _ ->
+                videoIdToWrite = null
+            }
+            .setOnDismissListener {
+                writeDialog = null
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun updateWriteDialogMessage(message: String) {
+        writeDialog?.findViewById<android.widget.TextView>(R.id.text_dialog_message)?.text = message
+    }
+
     // Bluetooth functions
     fun checkPermissionsAndInit() {
         val permissions = mutableListOf<String>()
@@ -136,6 +158,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun extractAndPlayVideo(data: android.net.Uri) {
+        // TODO: Move write operations here and support writing to external device
         val videoId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
         if (videoId.isNotBlank()) {
             playVideo(videoId)
@@ -192,9 +215,7 @@ class MainActivity : AppCompatActivity() {
                 val videoId = extractYoutubeId(sharedText)
                 if (videoId != null) {
                     videoIdToWrite = videoId
-                    Snackbar.make(binding.root, "Present an NFC tag to store the video", Snackbar.LENGTH_INDEFINITE)
-                        .setAction("Cancel") { videoIdToWrite = null }
-                        .show()
+                    showWriteDialog()
                 }
             }
             return
@@ -207,7 +228,6 @@ class MainActivity : AppCompatActivity() {
                 val tag = intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG)
                 if (videoIdToWrite != null && tag != null) {
                     writeToTag(tag, videoIdToWrite!!)
-                    videoIdToWrite = null
                     return
                 }
 
@@ -242,7 +262,12 @@ class MainActivity : AppCompatActivity() {
     private fun writeToTag(tag: Tag, videoId: String) {
         val ndef = Ndef.get(tag)
         if (ndef == null) {
-            Snackbar.make(binding.root, "NFC tag does not support NDEF", Snackbar.LENGTH_SHORT).show()
+            val error = "NFC tag støtter ikke NDEF"
+            if (writeDialog != null) {
+                updateWriteDialogMessage("$error. Prøv en annen tag.")
+            } else {
+                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+            }
             return
         }
 
@@ -253,20 +278,41 @@ class MainActivity : AppCompatActivity() {
         try {
             ndef.connect()
             if (!ndef.isWritable) {
-                Snackbar.make(binding.root, "NFC tag is read-only", Snackbar.LENGTH_SHORT).show()
+                val error = "NFC tag er ikke skrivbar"
+                if (writeDialog != null) {
+                    updateWriteDialogMessage("$error. Prøv en annen tag.")
+                } else {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
                 return
             }
             if (ndef.maxSize < message.toByteArray().size) {
-                Snackbar.make(binding.root, "NFC tag space is too small", Snackbar.LENGTH_SHORT).show()
+                val error = "NFC tag har for lite plass"
+                if (writeDialog != null) {
+                    updateWriteDialogMessage("$error. Prøv en annen tag.")
+                } else {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
                 return
             }
             ndef.writeNdefMessage(message)
-            Snackbar.make(binding.root, "Video stored successfully!", Snackbar.LENGTH_SHORT).show()
+            videoIdToWrite = null
+            writeDialog?.dismiss()
+            Snackbar.make(binding.root, "Tag date skrevet!", Snackbar.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Timber.e(e, "Error writing to tag")
-            Snackbar.make(binding.root, "Failed to write to tag", Snackbar.LENGTH_SHORT).show()
+            val error = "Feil ved skriving til tag"
+            if (writeDialog != null) {
+                updateWriteDialogMessage("$error. Prøv igjen.")
+            } else {
+                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+            }
         } finally {
-            ndef.close()
+            try {
+                ndef.close()
+            } catch (e: Exception) {
+                Timber.e(e, "Error closing ndef")
+            }
         }
     }
 }
