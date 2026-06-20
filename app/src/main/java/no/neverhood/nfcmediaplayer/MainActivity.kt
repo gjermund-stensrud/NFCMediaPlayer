@@ -2,7 +2,12 @@ package no.neverhood.nfcmediaplayer
 
 import android.Manifest
 import android.app.PendingIntent
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.nfc.NdefMessage
@@ -41,13 +46,27 @@ class MainActivity : AppCompatActivity() {
 
     private var pn532Manager: Pn532Manager? = null
 
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                when (state) {
+                    BluetoothAdapter.STATE_OFF -> {
+                        setStatus("Skru på Blåtann for å koble til ekstern NFC leser")
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        pn532Manager?.initBluetooth()
+                    }
+                }
+            }
+        }
+    }
+
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
-        if (allGranted) {
-            pn532Manager?.initBluetooth()
-        } else {
+        if (!allGranted) {
             Snackbar.make(binding.root, "Bluetooth permissions are required", Snackbar.LENGTH_INDEFINITE)
                 .setAction("Retry") { checkPermissionsAndInit() }
                 .show()
@@ -78,6 +97,11 @@ class MainActivity : AppCompatActivity() {
         pn532Manager = Pn532Manager(this)
         checkPermissionsAndInit()
 
+        // Bluetooth state receiver
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        registerReceiver(bluetoothStateReceiver, filter)
+        checkBluetoothState()
+
         // Init YoutubePlayerView
         val youTubePlayerView: YouTubePlayerView = binding.youtubePlayerView
         lifecycle.addObserver(youTubePlayerView)
@@ -98,7 +122,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun setStatus(text: String) {
-        binding.textStatus.text = text
+        runOnUiThread {
+            binding.textStatus.text = text
+        }
+    }
+
+    private fun checkBluetoothState() {
+        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothAdapter = bluetoothManager.adapter
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+            setStatus("Skru på Blåtann for å koble til ekstern NFC leser")
+        } else {
+            pn532Manager?.initBluetooth()
+        }
     }
 
     private fun showWriteDialog() {
@@ -134,9 +170,7 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
-        if (missingPermissions.isEmpty()) {
-            pn532Manager?.initBluetooth()
-        } else {
+        if (!missingPermissions.isEmpty()) {
             requestPermissionLauncher.launch(missingPermissions.toTypedArray())
         }
     }
@@ -184,6 +218,11 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         nfcAdapter?.disableForegroundDispatch(this)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(bluetoothStateReceiver)
     }
 
     private fun enableNfcForegroundDispatch() {

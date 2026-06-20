@@ -17,6 +17,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration.Companion.milliseconds
 
 // HM-10 UUIDs
 private val SERVICE_UUID = UUID.fromString("0000FFE0-0000-1000-8000-00805F9B34FB")
@@ -242,7 +243,7 @@ class Pn532Manager(val activity: MainActivity) {
             // Wait for complete response (assembled from one or more notifications)
             try {
                 if (timeoutMs > 0) {
-                    withTimeout(timeoutMs) {
+                    withTimeout(timeoutMs.milliseconds) {
                         deferred.await()
                     }
                 } else {
